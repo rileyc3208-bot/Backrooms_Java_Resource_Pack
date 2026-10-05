@@ -1,0 +1,97 @@
+name: Package Java resource pack
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Validate and package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Validate pack root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f pack.mcmeta
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("pack.mcmeta").read_text(encoding="utf-8"))
+          assert data["pack"]["pack_format"] == 84
+          assert isinstance(data["pack"]["description"], str)
+          PY
+
+      - name: Build distributable ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            VERSION="snapshot-${GITHUB_SHA::12}"
+          fi
+          NAME="BackroomsPort-Java-Resource-Pack-${VERSION}.zip"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          root = Path(".")
+          out_dir = root / "build"
+          version = __import__("os").environ.get("GITHUB_REF_NAME", "snapshot")
+          if __import__("os").environ.get("GITHUB_REF_TYPE") == "tag":
+              version = version.removeprefix("v")
+          else:
+              version = "snapshot-" + __import__("os").environ.get("GITHUB_SHA", "")[:12]
+          out = out_dir / f"BackroomsPort-Java-Resource-Pack-{version}.zip"
+
+          excluded_roots = {".git", ".github", "build"}
+          with ZipFile(out, "w", ZIP_DEFLATED) as zf:
+              for path in sorted(root.rglob("*")):
+                  if not path.is_file():
+                      continue
+                  rel = path.relative_to(root)
+                  if rel.parts[0] in excluded_roots:
+                      continue
+                  if rel.name == "README.md":
+                      continue
+                  zf.write(path, rel.as_posix())
+          PY
+
+          test "$(unzip -Z1 "build/$NAME" | head -1)" = "pack.mcmeta" ||             unzip -Z1 "build/$NAME" | grep -qx 'pack.mcmeta'
+          sha1sum "build/$NAME" > "build/$NAME.sha1"
+          sha256sum "build/$NAME" > "build/$NAME.sha256"
+
+      - name: Upload packaged snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-resource-pack-${{ github.sha }}
+          path: |
+            build/*.zip
+            build/*.sha1
+            build/*.sha256
+
+      - name: Publish tagged release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="BackroomsPort-Java-Resource-Pack-${VERSION}.zip"
+
+          gh release create "$GITHUB_REF_NAME"             "build/$NAME#Java resource pack"             "build/$NAME.sha1#Minecraft SHA-1"             "build/$NAME.sha256#SHA-256"             --title "BackroomsPort Java Resource Pack ${VERSION}"             --notes "Public Java resource-pack distribution for BackroomsPort. Java clients are not currently part of the production player base."
